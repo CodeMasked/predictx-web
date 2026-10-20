@@ -9,7 +9,10 @@ import { installGlobalErrorHandlers } from "@/lib/error-reporter";
  */
 export function ErrorHandlerMount() {
   useEffect(() => {
-    installGlobalErrorHandlers();
+    // installGlobalErrorHandlers is idempotent — safe under React Strict Mode.
+    // The returned cleanup removes both listeners and resets the flag so a
+    // subsequent mount (e.g. after a Fast Refresh) can re-install cleanly.
+    return installGlobalErrorHandlers();
   }, []);
 
   return null;

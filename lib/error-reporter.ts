@@ -48,11 +48,51 @@ export function reportError(
   _send(payload);
 }
 
-/** Install global window.onerror + unhandledrejection handlers. */
-export function installGlobalErrorHandlers(): void {
-  if (typeof window === "undefined") return;
+/**
+ * Module-level flag that prevents double-registration.
+ *
+ * Set to `true` the first time {@link installGlobalErrorHandlers} runs and
+ * reset to `false` when the returned cleanup function is called.  This makes
+ * the function safe to call from React Strict Mode (which double-invokes
+ * effects in development) and from any Fast Refresh remount.
+ */
+let _handlersInstalled = false;
 
-  window.onerror = (message, source, lineno, colno, error) => {
+/**
+ * Install global window.onerror + unhandledrejection handlers.
+ *
+ * Idempotent: a second call while the handlers are already registered is a
+ * no-op and returns a no-op cleanup so callers can always call the returned
+ * function safely.
+ *
+ * Chains to any pre-existing `window.onerror` so third-party libraries that
+ * set their own handler before this call are not clobbered.
+ *
+ * @returns A cleanup function that removes both handlers and resets the
+ *   idempotency flag so the handlers can be re-installed if needed (e.g. in
+ *   tests).  Pass it as the return value of the `useEffect` that calls this
+ *   function.
+ */
+export function installGlobalErrorHandlers(): () => void {
+  if (typeof window === "undefined") return () => {};
+
+  // Guard: already installed — return a no-op cleanup.
+  if (_handlersInstalled) return () => {};
+
+  _handlersInstalled = true;
+
+  // ── window.onerror ───────────────────────────────────────────────────────
+  // Preserve any handler registered by another library before us so we can
+  // forward to it after reporting.
+  const previousOnerror = window.onerror ?? null;
+
+  const onerrorHandler: OnErrorEventHandler = (
+    message,
+    source,
+    lineno,
+    colno,
+    error,
+  ) => {
     const payload: ErrorPayload = {
       type: "uncaught-error",
       message: String(message),
@@ -63,24 +103,44 @@ export function installGlobalErrorHandlers(): void {
       userAgent: navigator.userAgent,
     };
     _send(payload);
-    return false; // let default browser handling proceed
+
+    // Chain to the previous handler if one existed.
+    if (typeof previousOnerror === "function") {
+      return previousOnerror(message, source, lineno, colno, error);
+    }
+
+    // Return false so the browser's default error handling still fires.
+    return false;
   };
 
-  window.addEventListener("unhandledrejection", (event) => {
+  window.onerror = onerrorHandler;
+
+  // ── unhandledrejection ───────────────────────────────────────────────────
+  const rejectionHandler = (event: PromiseRejectionEvent) => {
     const reason = event.reason;
     const payload: ErrorPayload = {
       type: "unhandled-rejection",
       message:
-        reason instanceof Error
-          ? reason.message
-          : String(reason),
+        reason instanceof Error ? reason.message : String(reason),
       stack: reason instanceof Error ? reason.stack : undefined,
       route: window.location.pathname,
       timestamp: new Date().toISOString(),
       userAgent: navigator.userAgent,
     };
     _send(payload);
-  });
+  };
+
+  window.addEventListener("unhandledrejection", rejectionHandler);
+
+  // ── cleanup ──────────────────────────────────────────────────────────────
+  return () => {
+    window.removeEventListener("unhandledrejection", rejectionHandler);
+
+    // Restore the handler that was in place before we installed ours.
+    window.onerror = previousOnerror;
+
+    _handlersInstalled = false;
+  };
 }
 
 // ─── internal ────────────────────────────────────────────────────────────────
