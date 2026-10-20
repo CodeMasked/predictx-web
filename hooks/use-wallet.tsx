@@ -253,13 +253,24 @@ export const useWallet = create<WalletState>()(
               balanceStatus: "ok",
               balanceError: null,
             });
+            // Show the success toast only when the balance fetch also succeeded.
+            // Placing it outside this branch caused a contradictory pair of
+            // toasts: "Balance unavailable on Mainnet" immediately followed by
+            // "Switched to Mainnet / You are now on Stellar Mainnet".
+            toast.success(`Switched to ${network}`, {
+              description:
+                network === "mainnet"
+                  ? "You are now on Stellar Mainnet"
+                  : "You are now on Stellar Testnet",
+            });
           } else {
             // Keep the last-known balance; surface the error instead.
             set({
               balanceStatus: "error",
               balanceError: result.message,
             });
-            toast.warning("Balance unavailable on this network.", {
+            // Single, accurate toast — no success message follows.
+            toast.warning(`Switched to ${network} — balance unavailable.`, {
               description: result.message,
               action:
                 network === "mainnet"
@@ -270,14 +281,16 @@ export const useWallet = create<WalletState>()(
                   : undefined,
             });
           }
+        } else {
+          // Wallet not connected — network preference is stored but there is
+          // no balance to fetch.  Show the plain success toast immediately.
+          toast.success(`Switched to ${network}`, {
+            description:
+              network === "mainnet"
+                ? "You are now on Stellar Mainnet"
+                : "You are now on Stellar Testnet",
+          });
         }
-
-        toast.success(`Switched to ${network}`, {
-          description:
-            network === "mainnet"
-              ? "You are now on Stellar Mainnet"
-              : "You are now on Stellar Testnet",
-        });
       },
 
       refreshBalance: async () => {
