@@ -1,5 +1,3 @@
-"use client";
-
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { MOCK_STAKES, STORAGE_KEYS, type Stake } from "@/lib/mock-data";
@@ -10,6 +8,15 @@ import {
 import { useMockData } from "@/hooks/use-mock-data";
 import { useWallet, type TransactionReceipt } from "@/hooks/use-wallet";
 import { trackEvent } from "@/lib/analytics";
+
+/**
+ * Maximum number of stakes kept in persisted storage.
+ *
+ * When the array exceeds this limit the oldest entries (lowest indices after
+ * the prepend) are evicted.  The cap keeps the localStorage payload bounded
+ * while retaining the most-recent activity for display.
+ */
+const MAX_STAKES = 200;
 
 interface StakingState {
 	/**
@@ -102,7 +109,7 @@ export const useStaking = create<StakingState>()(
 					wallet: walletState.address,
 				};
 
-				set((s) => ({ stakes: [...s.stakes, stake] }));
+				set((s) => ({ stakes: [...s.stakes, stake].slice(-MAX_STAKES) }));
 
 				// Analytics — no wallet address or seeds
 				const poll = useMockData.getState().getPoll(pollId);
@@ -125,6 +132,44 @@ export const useStaking = create<StakingState>()(
 					stakes: s.stakes.filter((stake) => stake.wallet !== address),
 				})),
 		}),
-		{ name: STORAGE_KEYS.stakes },
+		{ name: STORAGE_KEYS.stakes,
+		  /**
+		   * Only persist the raw stakes array — computed selectors (activeStakes,
+		   * pendingStakes, completedStakes) are re-derived on every access so they
+		   * never need to be serialised.
+		   */
+		  partialize: (state) => ({ stakes: state.stakes }),
+		  /**
+		   * Wrap every setItem call so a QuotaExceededError degrades to memory-only
+		   * instead of propagating through the action and leaving the in-memory
+		   * state out of sync with what was persisted.
+		   */
+		  storage: {
+		    getItem: (name) => {
+		      const value = localStorage.getItem(name);
+		      return value ? JSON.parse(value) : null;
+		    },
+		    setItem: (name, value) => {
+		      try {
+		        localStorage.setItem(name, JSON.stringify(value));
+		      } catch (err) {
+		        if (
+		          err instanceof DOMException &&
+		          (err.name === "QuotaExceededError" ||
+		            err.name === "NS_ERROR_DOM_QUOTA_REACHED")
+		        ) {
+		          // Storage is full — in-memory state is still correct, so we
+		          // swallow the error rather than surfacing a confusing throw.
+		          if (process.env.NODE_ENV !== "production") {
+		            console.warn("[use-staking] localStorage quota exceeded — stake persisted in memory only.");
+		          }
+		        } else {
+		          throw err;
+		        }
+		      }
+		    },
+		    removeItem: (name) => localStorage.removeItem(name),
+		  },
+		},
 	),
 );

@@ -141,6 +141,62 @@ export const useMockData = create<MockDataState>()(
     {
       name: STORAGE_KEYS.pools,
       /**
+       * Partialize to mutable deltas only.
+       *
+       * `matches` and `polls` are seeded from compile-time constants (MATCHES /
+       * POLLS) and refreshed on every rehydration via `onRehydrateStorage`.
+       * Persisting the *entire* dataset on every `updatePollPool` call (which
+       * may be triggered by every keystroke / stake) results in a synchronous
+       * JSON.stringify of the full matches + polls payload for every write.
+       *
+       * Instead we persist only the mutable deltas:
+       *   - `polls`             — pool amounts and staker lists change at runtime.
+       *   - `userCreatedPollCount` — incremented by `addPoll`.
+       *
+       * `matches` and `platformStats` are never mutated at runtime, so they are
+       * excluded.  They are always re-seeded from the source constants.
+       */
+      partialize: (state) => ({
+        polls: state.polls,
+        userCreatedPollCount: state.userCreatedPollCount,
+      }),
+      /**
+       * Wrap setItem so a QuotaExceededError degrades gracefully.
+       *
+       * Without this guard the error escapes through the Zustand persist
+       * middleware and surfaces inside the action that triggered it (e.g.
+       * `updatePollPool`), at which point the in-memory state has already been
+       * updated but the change was not persisted — the worst possible outcome.
+       * We swallow the quota error and keep the in-memory update so the UI
+       * continues to work correctly for the rest of the session.
+       */
+      storage: {
+        getItem: (name) => {
+          const value = localStorage.getItem(name);
+          return value ? JSON.parse(value) : null;
+        },
+        setItem: (name, value) => {
+          try {
+            localStorage.setItem(name, JSON.stringify(value));
+          } catch (err) {
+            if (
+              err instanceof DOMException &&
+              (err.name === "QuotaExceededError" ||
+                err.name === "NS_ERROR_DOM_QUOTA_REACHED")
+            ) {
+              if (process.env.NODE_ENV !== "production") {
+                console.warn(
+                  "[use-mock-data] localStorage quota exceeded — pool update persisted in memory only.",
+                );
+              }
+            } else {
+              throw err;
+            }
+          }
+        },
+        removeItem: (name) => localStorage.removeItem(name),
+      },
+      /**
        * After zustand rehydrates from localStorage, fix up two classes of
        * staleness that a returning user would otherwise see:
        *
