@@ -116,14 +116,19 @@ async function fetchBalance(
 }
 
 /**
- * Module-level latch for {@link useWallet.sendTransaction}.
+ * Per-address in-flight transaction latch.
  *
  * Deliberately outside the store: the guard has to be readable synchronously
  * from inside the transaction body, and it must survive the store being
- * replaced by a `persist` rehydrate mid-flight. One transaction at a time per
- * wallet is the invariant.
+ * replaced by a `persist` rehydrate mid-flight.
+ *
+ * Keyed by wallet address so that disconnecting one wallet (or switching
+ * networks) does not leave a stale latch that blocks the next wallet's first
+ * transaction.  The comment "one transaction at a time per wallet" is now
+ * enforced at the data-structure level rather than relying on callers to clear
+ * a single boolean.
  */
-let transactionInFlight = false;
+const transactionsInFlight = new Set<string>();
 
 export const useWallet = create<WalletState>()(
   persist(
@@ -224,6 +229,11 @@ export const useWallet = create<WalletState>()(
             typeof import("@/hooks/use-voting");
           useStaking.getState().clearWalletStakes(address);
           useVoting.getState().clearWalletVotes(address);
+
+          // Release the per-address transaction latch so that reconnecting
+          // this (or any other) wallet is never blocked by a transaction that
+          // was in flight at the moment of disconnect.
+          transactionsInFlight.delete(address);
         }
 
         trackEvent({ name: "wallet_disconnect" });
@@ -240,6 +250,14 @@ export const useWallet = create<WalletState>()(
       switchNetwork: async (network: StellarNetwork) => {
         const { address, isConnected } = get();
         set({ network });
+
+        // A network switch invalidates any in-flight transaction for this
+        // address: the transaction was submitted against the old network and
+        // its result is undefined on the new one.  Clear the latch so the
+        // wallet is not permanently blocked after a mid-transaction switch.
+        if (address) {
+          transactionsInFlight.delete(address);
+        }
 
         if (isConnected && address) {
           set({ balanceStatus: "loading", balanceError: null });
@@ -330,7 +348,7 @@ export const useWallet = create<WalletState>()(
         }
 
         /**
-         * Re-entrancy latch.
+         * Re-entrancy latch (per-address).
          *
          * The simulated latency below is 1-2s, and the balance debit happens
          * *after* it. Without this latch, two overlapping calls both read the
@@ -340,15 +358,16 @@ export const useWallet = create<WalletState>()(
          * second concurrent transaction from one wallet is never legitimate
          * here: every call site debits as part of placing a single stake.
          *
-         * A module-level ref rather than store state, so the check is
-         * synchronous and cannot be defeated by two calls in the same tick.
+         * Keyed by wallet address (not a single module-level boolean) so that
+         * disconnecting one wallet and immediately connecting another does not
+         * inherit the previous wallet's latch.
          */
-        if (transactionInFlight) {
+        if (transactionsInFlight.has(state.address)) {
           throw new Error(
             "A transaction is already in progress. Please wait for it to finish.",
           );
         }
-        transactionInFlight = true;
+        transactionsInFlight.add(state.address);
 
         try {
           // Round to stroop precision (7 decimal places = 10^-7 XLM) to avoid
@@ -417,7 +436,7 @@ export const useWallet = create<WalletState>()(
 
           return receipt;
         } finally {
-          transactionInFlight = false;
+          transactionsInFlight.delete(state.address);
         }
       },
     }),
